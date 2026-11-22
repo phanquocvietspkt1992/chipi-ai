@@ -46,6 +46,7 @@ public sealed class ChipiApp : MonoBehaviour
     private Animation motion;
     private Camera characterView;
     private Transform characterTurn;
+    private Light characterFill;
     private Material shadowMaterial;
     private Mesh shadowMesh;
     private Renderer mouth;
@@ -53,7 +54,7 @@ public sealed class ChipiApp : MonoBehaviour
     private MaterialPropertyBlock chestExpression;
     private static readonly int ChestGlow = Shader.PropertyToID("_ChestGlow");
     private MaterialPropertyBlock expression;
-    private float jaw, mouthRound, focus, chestPulse;
+    private float jaw, mouthRound, focus, chestPulse, motionEnergy, motionLean;
     private float nextBlink = 2.8f;
     private float micLevel;
     private float micPeak;
@@ -296,7 +297,7 @@ public sealed class ChipiApp : MonoBehaviour
         UpdateCharacterViewport();
         RenderSettings.ambientLight = new Color(.67f, .71f, .8f);
         AddLight("Key", new Vector3(34, -32, 0), 1.25f);
-        AddLight("Fill", new Vector3(20, 131, 0), .65f);
+        characterFill = AddLight("Fill", new Vector3(20, 131, 0), .65f);
         characterTurn = new GameObject("Character turn").transform;
         characterTurn.localRotation = Quaternion.Euler(0, -13, 0);
         AddContactShadow();
@@ -416,12 +417,13 @@ public sealed class ChipiApp : MonoBehaviour
         if (shadowMesh != null) Destroy(shadowMesh);
     }
 
-    private static void AddLight(string label, Vector3 rotation, float intensity)
+    private static Light AddLight(string label, Vector3 rotation, float intensity)
     {
         var light = new GameObject(label).AddComponent<Light>();
         light.type = LightType.Directional;
         light.intensity = intensity;
         light.transform.rotation = Quaternion.Euler(rotation);
+        return light;
     }
 
     private void Play(string clip)
@@ -495,9 +497,24 @@ public sealed class ChipiApp : MonoBehaviour
         UpdateCharacterViewport();
         bool attentive = phase is VoicePhase.Listening or VoicePhase.Thinking or VoicePhase.Speaking;
         focus = Mathf.MoveTowards(focus, attentive ? 1 : 0, 3 * Time.deltaTime);
+        float targetEnergy = phase switch
+        {
+            VoicePhase.Listening => .55f,
+            VoicePhase.Thinking => .7f,
+            VoicePhase.Speaking => 1f,
+            _ => .3f
+        };
+        float targetLean = phase == VoicePhase.Listening ? 3f : phase == VoicePhase.Thinking ? -3f : 0f;
+        motionEnergy = Mathf.MoveTowards(motionEnergy, targetEnergy, 2 * Time.deltaTime);
+        motionLean = Mathf.MoveTowards(motionLean, targetLean, 8 * Time.deltaTime);
         float turn = Mathf.Lerp(-13, -5, focus);
-        float sway = Mathf.Lerp(2.6f, .65f, focus);
-        characterTurn.localRotation = Quaternion.Euler(0, turn + sway * Mathf.Sin(Time.time * 1.05f), 0);
+        float sway = Mathf.Lerp(2.6f, 4.5f, motionEnergy);
+        characterTurn.localPosition = new Vector3(0, .025f * motionEnergy * Mathf.Sin(Time.time * 2.2f), 0);
+        characterTurn.localRotation = Quaternion.Euler(2f * motionEnergy * Mathf.Sin(Time.time * 1.8f),
+            turn + sway * Mathf.Sin(Time.time * 1.05f),
+            motionLean + 2.5f * motionEnergy * Mathf.Sin(Time.time * 1.7f));
+        if (characterFill != null)
+            characterFill.intensity = .65f + .12f * motionEnergy * (.5f + .5f * Mathf.Sin(Time.time * 2.2f));
         if (mouth == null) return;
         float open = 0;
         float round = 0;
