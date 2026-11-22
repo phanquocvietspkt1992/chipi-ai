@@ -55,6 +55,8 @@ public sealed class ChipiApp : MonoBehaviour
     private static readonly int ChestGlow = Shader.PropertyToID("_ChestGlow");
     private MaterialPropertyBlock expression;
     private float jaw, mouthRound, focus, chestPulse, motionEnergy, motionLean;
+    private bool greetOnFirstSpeech = true, greetingAnimation;
+    private float greetingEndTime;
     private float nextBlink = 2.8f;
     private float micLevel;
     private float micPeak;
@@ -495,6 +497,18 @@ public sealed class ChipiApp : MonoBehaviour
     private void LateUpdate()
     {
         UpdateCharacterViewport();
+        if (greetOnFirstSpeech && phase == VoicePhase.Speaking && motion != null && motion["Greeting"] != null)
+        {
+            greetOnFirstSpeech = false;
+            greetingAnimation = true;
+            greetingEndTime = Time.time + motion["Greeting"].length;
+            Play("Greeting");
+        }
+        if (greetingAnimation && (phase != VoicePhase.Speaking || Time.time >= greetingEndTime))
+        {
+            greetingAnimation = false;
+            if (phase == VoicePhase.Speaking) Play("Talking");
+        }
         bool attentive = phase is VoicePhase.Listening or VoicePhase.Thinking or VoicePhase.Speaking;
         focus = Mathf.MoveTowards(focus, attentive ? 1 : 0, 3 * Time.deltaTime);
         float targetEnergy = phase switch

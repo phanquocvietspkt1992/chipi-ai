@@ -64,7 +64,7 @@ Shader "Chipi/Concept Projection"
                 float2 offset = uv - pivot;
                 float influence = 1.0 - smoothstep(0.45, 1.0,
                     length(offset / float2(0.066, 0.056)));
-                float mouthHeight = lerp(1.0, lerp(0.56, 1.65, _JawOpen), _Speaking);
+                float mouthHeight = lerp(1.0, lerp(0.48, 2.25, _JawOpen), _Speaking);
                 float mouthWidth = lerp(1.0, lerp(1.10, 0.68, _MouthRound), _Speaking);
                 uv = pivot + offset / lerp(float2(1.0, 1.0), float2(mouthWidth, mouthHeight), influence);
                 fixed4 color = tex2D(_MainTex, uv);
