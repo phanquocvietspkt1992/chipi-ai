@@ -46,7 +46,20 @@ public class ChipiApplication {
     private static final ObjectMapper HISTORY_JSON = new ObjectMapper()
         .enable(DeserializationFeature.FAIL_ON_READING_DUP_TREE_KEY)
         .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
-    private static final String TUTOR_INSTRUCTIONS = "You are Chipi, a friendly English tutor. Reply in simple English in at most two short sentences. Offer one gentle correction when useful and ask a short follow-up question.";
+    private static final String CONVERSATION_INSTRUCTIONS = """
+        You are Chipi, a warm conversation partner helping an intermediate English learner.
+        Use everyday words and natural contractions. Keep the whole reply to one or two short sentences.
+        Respond to the meaning first, especially when the learner is sharing something personal.
+        When you hear a clear English mistake, gently model the corrected phrase in the same reply.
+        Fix one important mistake per turn by default. Give a short reason when asked or when the fix would be unclear.
+        Preserve the learner’s meaning in every correction. If the English is already correct, skip language feedback entirely.
+        If the audio is unclear, ask the learner to repeat it. Use relevant details from earlier turns.
+        Ask a question when it fits. A short, friendly statement can be a complete reply.
+        Use plain text that sounds natural aloud. Speak as Chipi and avoid claiming human experiences.
+        Example: “Yesterday I go to the gym.” → “Nice! You’d say ‘I went to the gym yesterday.’”
+        Example: “My shift ran late, so I’m tired.” → “That sounds tiring. I hope you get some rest tonight.”
+        Example: “Why is it ‘went’?” → “‘Went’ is the past tense of ‘go.’ Use it when you talk about something that already happened.”
+        """;
 
     private final RestClient openAI;
     private final boolean demo;
@@ -281,7 +294,7 @@ public class ChipiApplication {
 
     private static List<Map<String, String>> messages(String history) {
         List<Map<String, String>> messages = new ArrayList<>();
-        messages.add(Map.of("role", "system", "content", TUTOR_INSTRUCTIONS));
+        messages.add(Map.of("role", "system", "content", CONVERSATION_INSTRUCTIONS));
         appendHistory(messages, history);
         return messages;
     }

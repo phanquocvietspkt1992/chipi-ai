@@ -11,6 +11,11 @@ public sealed class ChipiApp : MonoBehaviour
 {
 #if UNITY_IOS && !UNITY_EDITOR
     [DllImport("__Internal")] private static extern int ChipiAudioPlayback();
+    [DllImport("__Internal")] private static extern void ChipiLocalStart(byte[] wav, int size, [MarshalAs(UnmanagedType.LPUTF8Str)] string context);
+    [DllImport("__Internal")] private static extern int ChipiLocalRead([Out] byte[] result, int size);
+    [DllImport("__Internal")] private static extern void ChipiLocalSpeak([MarshalAs(UnmanagedType.LPUTF8Str)] string text);
+    [DllImport("__Internal")] private static extern int ChipiLocalPlayback();
+    [DllImport("__Internal")] private static extern void ChipiLocalCancel();
     [DllImport("__Internal")] private static extern void ChipiMicWatchBackground();
     [DllImport("__Internal")] private static extern int ChipiMicWasBackgrounded();
     [DllImport("__Internal")] private static extern void ChipiMicRequestPermission();
@@ -31,7 +36,8 @@ public sealed class ChipiApp : MonoBehaviour
     private TouchScreenKeyboard addressEntry;
     private static readonly Color Ink = new(0.06f, 0.18f, 0.29f);
     private static readonly Color Blue = new(0.14f, 0.37f, 0.74f);
-    private const float HeaderHeight = 48f;
+    private const float CharacterCardGap = 10f;
+    private const float FooterHeight = 16f;
     private const float ControlAreaHeight = 168f;
     private Animation motion;
     private Camera characterView;
@@ -76,11 +82,23 @@ public sealed class ChipiApp : MonoBehaviour
     private bool settingsOpen;
     private const int PlaybackBufferMs = 1000;
     private bool server;
+    private bool localVoice;
+#if UNITY_IOS && !UNITY_EDITOR
+    private bool localSpeaking;
+
+    [Serializable]
+    private sealed class LocalReply
+    {
+        public string transcript;
+        public string reply;
+        public string error;
+    }
+#endif
     private string status = "";
     private string transcript = "";
     private string reply = "Hello, how can I help you?";
     private bool stylesReady;
-    private GUIStyle title, body, small, dialogueReply, dialogueTranscript, primary, secondary, phaseStyle;
+    private GUIStyle body, small, dialogueReply, dialogueTranscript, primary, secondary, phaseStyle;
     private string displayedReply, displayedTranscript;
     private float dialogueOffset, touchStartY, touchStartOffset;
     private readonly float[] output = new float[256];
@@ -270,10 +288,14 @@ public sealed class ChipiApp : MonoBehaviour
             PlayerPrefs.SetString("DeviceEndpoint", phoneEndpoint);
             PlayerPrefs.SetString("DeviceToken", phoneToken);
             PlayerPrefs.SetInt("VoiceServerEnabled", 1);
+            PlayerPrefs.SetInt("UseOnDeviceVoice", 0);
             PlayerPrefs.Save();
         }
 #endif
-        server = PlayerPrefs.GetInt("VoiceServerEnabled", defaultServer) == 1;
+#if UNITY_IOS && !UNITY_EDITOR && !CHIPI_SIMULATOR_BUILD
+        localVoice = PlayerPrefs.GetInt("UseOnDeviceVoice", 1) == 1;
+#endif
+        server = PlayerPrefs.GetInt("VoiceServerEnabled", defaultServer) == 1 && !localVoice;
         Screen.orientation = ScreenOrientation.Portrait;
         var view = new GameObject("Chipi camera").AddComponent<Camera>();
         view.gameObject.AddComponent<AudioListener>();
@@ -375,6 +397,9 @@ public sealed class ChipiApp : MonoBehaviour
 
     private void OnDestroy()
     {
+#if UNITY_IOS && !UNITY_EDITOR
+        CancelLocalVoice();
+#endif
         if (shadowMaterial != null) Destroy(shadowMaterial);
         if (shadowMesh != null) Destroy(shadowMesh);
     }
@@ -497,6 +522,9 @@ public sealed class ChipiApp : MonoBehaviour
             if (squares > .0001f)
                 round = (1 - Mathf.InverseLerp(.11f, .4f, Mathf.Sqrt(edges / squares))) * Mathf.Sqrt(open);
         }
+#if UNITY_IOS && !UNITY_EDITOR
+        if (localSpeaking) open = .18f + .34f * Mathf.Abs(Mathf.Sin(Time.unscaledTime * 17f));
+#endif
         float response = open > jaw ? 26f : 15f;
         jaw = Mathf.Lerp(jaw, open, 1 - Mathf.Exp(-Time.deltaTime * response));
         // The closed pose is used only within speech; the resting smile remains intact.
@@ -741,6 +769,9 @@ public sealed class ChipiApp : MonoBehaviour
         activeTurnRequest?.Abort();
         activeTurnRequest = null;
         StopAllCoroutines();
+#if UNITY_IOS && !UNITY_EDITOR
+        CancelLocalVoice();
+#endif
         speaker.Stop();
         if (streamingClip != null)
         {
@@ -795,6 +826,9 @@ public sealed class ChipiApp : MonoBehaviour
         activeTurnRequest?.Abort();
         activeTurnRequest = null;
         StopAllCoroutines();
+#if UNITY_IOS && !UNITY_EDITOR
+        CancelLocalVoice();
+#endif
         speaker.Stop();
         if (streamingClip != null)
         {
@@ -847,6 +881,13 @@ public sealed class ChipiApp : MonoBehaviour
     private IEnumerator Send(byte[] wav, string endpointOverride = null, bool checkHistory = false,
         double captureStopped = -1, int pauseMs = -1, string diagnosticId = null)
     {
+#if UNITY_IOS && !UNITY_EDITOR
+        if (localVoice && endpointOverride == null)
+        {
+            yield return SendLocal(wav);
+            yield break;
+        }
+#endif
         string session = EnsureDiagnosticSession();
         diagnosticId ??= Guid.NewGuid().ToString("D");
         int requestNumber = ++diagnosticRequestNumber;
@@ -981,7 +1022,28 @@ public sealed class ChipiApp : MonoBehaviour
                 if (streamingClip != null) { speaker.clip = null; Destroy(streamingClip); streamingClip = null; }
                 int responseCode = streamed.error != 0 ? streamed.error : (int)request.responseCode;
                 Diagnostic($"turn.failed id={diagnosticId} stage={streamed.errorStage ?? "client_or_transport"} status={responseCode} result={request.result} invalid={invalid} finished={streamed.Finished}");
-                FailTurn(invalid || responseCode == 200 ? "Chipi received unreadable audio." : VoiceError(responseCode));
+#if UNITY_IOS && !UNITY_EDITOR
+                if (!invalid && !playing && streamed.error == 429 && streamed.errorStage == "speech_synthesis" &&
+                    !string.IsNullOrWhiteSpace(streamed.reply))
+                {
+                    transcript = streamed.transcript;
+                    reply = streamed.reply;
+                    bool spoken = false;
+                    yield return SpeakWithSystemVoice(reply, requestStarted, success => spoken = success);
+                    Diagnostic($"playback.system_fallback id={diagnosticId} completed={spoken}");
+                    if (spoken)
+                    {
+                        retryAudio = null;
+                        RememberTurn(rememberTurn);
+                        yield return RearmConversation();
+                        yield break;
+                    }
+                    FailTurn("Chipi has a reply, but couldn’t read it aloud.");
+                    yield break;
+                }
+#endif
+                FailTurn(invalid || responseCode == 200 ? "Chipi received unreadable audio."
+                    : VoiceError(responseCode, streamed.errorStage));
                 yield break;
             }
             int previousAvailable = streamed.audio.Available;
@@ -1029,6 +1091,74 @@ public sealed class ChipiApp : MonoBehaviour
         RememberTurn(rememberTurn);
         yield return RearmConversation();
     }
+
+#if UNITY_IOS && !UNITY_EDITOR
+    private void CancelLocalVoice()
+    {
+        localSpeaking = false;
+        ChipiLocalCancel();
+    }
+
+    private IEnumerator SendLocal(byte[] wav)
+    {
+        EnsureDiagnosticSession();
+        retryAudio = wav;
+        busy = true;
+        phase = VoicePhase.Thinking;
+        status = "";
+        Play("Idle");
+        var context = JsonUtility.ToJson(new TurnHistory { turns = conversationHistory.ToArray() });
+        double started = Time.realtimeSinceStartupAsDouble;
+        ChipiLocalStart(wav, wav.Length, context);
+        var result = new byte[8192];
+        int size = 0;
+        while (Time.realtimeSinceStartupAsDouble - started < 60 && (size = ChipiLocalRead(result, result.Length)) == 0)
+            yield return null;
+
+        LocalReply answer = size > 0 ? JsonUtility.FromJson<LocalReply>(Encoding.UTF8.GetString(result, 0, size)) : null;
+        if (answer == null || !string.IsNullOrEmpty(answer.error) || string.IsNullOrWhiteSpace(answer.reply))
+        {
+            CancelLocalVoice();
+            FailTurn(answer?.error ?? "On-device conversation timed out. Try again.");
+            yield break;
+        }
+
+        transcript = answer.transcript;
+        reply = answer.reply;
+        bool spoken = false;
+        yield return SpeakWithSystemVoice(reply, started, success => spoken = success);
+        if (!spoken)
+        {
+            FailTurn("On-device playback was interrupted. Try again.");
+            yield break;
+        }
+        retryAudio = null;
+        RememberTurn(conversationActive);
+        yield return RearmConversation();
+    }
+
+    private IEnumerator SpeakWithSystemVoice(string text, double started, Action<bool> completed)
+    {
+        ChipiAudioPlayback();
+        ChipiLocalSpeak(text);
+        double queued = Time.realtimeSinceStartupAsDouble;
+        int state;
+        while ((state = ChipiLocalPlayback()) == 1 && Time.realtimeSinceStartupAsDouble - queued < 8)
+            yield return null;
+        if (state == 2)
+        {
+            phase = VoicePhase.Speaking;
+            status = "";
+            localSpeaking = true;
+            Play("Talking");
+            Diagnostic($"turn.local_playback_started replyMs={(Time.realtimeSinceStartupAsDouble - started) * 1000:F0}");
+            while ((state = ChipiLocalPlayback()) == 2 && Time.realtimeSinceStartupAsDouble - queued < 45)
+                yield return null;
+        }
+        CancelLocalVoice();
+        completed(state == 3);
+    }
+#endif
 
     private IEnumerator SendLegacy(byte[] wav, string endpointOverride = null, bool checkHistory = false, string diagnosticId = null)
     {
@@ -1099,11 +1229,13 @@ public sealed class ChipiApp : MonoBehaviour
         }
     }
 
-    private static string VoiceError(int responseCode)
+    private static string VoiceError(int responseCode, string stage = null)
     {
         return responseCode switch
         {
             422 => "I didn't catch that. Speak clearly and try again.",
+            429 when stage == "speech_synthesis" => "Chipi’s cloud voice is temporarily limited.",
+            429 when stage == "transcription" => "The AI provider is limiting requests. Try again later.",
             429 => "The voice server is busy. Try again in a moment.",
             502 => "The voice provider is unavailable. Try the offline demo.",
             0 => "Can't connect to the voice server. Try the offline demo.",
@@ -1231,6 +1363,10 @@ public sealed class ChipiApp : MonoBehaviour
     private void SetServerEnabled(bool enabled)
     {
         server = enabled;
+#if UNITY_IOS && !UNITY_EDITOR && !CHIPI_SIMULATOR_BUILD
+        localVoice = !enabled;
+        PlayerPrefs.SetInt("UseOnDeviceVoice", localVoice ? 1 : 0);
+#endif
         PlayerPrefs.SetInt("VoiceServerEnabled", enabled ? 1 : 0);
         PlayerPrefs.Save();
     }
@@ -1537,7 +1673,10 @@ public sealed class ChipiApp : MonoBehaviour
         Mathf.Min(safe.width / 390f, safe.height / 760f);
 
     private static float CardHeight(float height) =>
-        Mathf.Clamp(height * .275f, 200f, 238f);
+        Mathf.Clamp(height * .39f, 285f, 338f) + 20f;
+
+    private static float CardTop(float height) =>
+        height - FooterHeight - ControlAreaHeight - CardHeight(height);
 
     private void UpdateCharacterViewport()
     {
@@ -1545,8 +1684,8 @@ public sealed class ChipiApp : MonoBehaviour
         float scale = PortraitScale(safe);
         if (scale <= 0 || Screen.height <= 0) return;
         float height = safe.height / scale;
-        float bottom = safe.yMax - (height - ControlAreaHeight - CardHeight(height) - 12f) * scale;
-        float top = safe.yMax - HeaderHeight * scale;
+        float bottom = safe.yMax - (CardTop(height) - CharacterCardGap) * scale;
+        float top = safe.yMax;
         var viewport = new Rect(0, bottom / Screen.height, 1, (top - bottom) / Screen.height);
         if (characterView.rect != viewport) characterView.rect = viewport;
     }
@@ -1635,7 +1774,6 @@ public sealed class ChipiApp : MonoBehaviour
     {
         if (!stylesReady)
         {
-            title = Label(29, Ink, true);
             body = Label(19, Ink, true);
             small = Label(13, Ink);
             dialogueReply = Label(19, Ink, true);
@@ -1654,22 +1792,22 @@ public sealed class ChipiApp : MonoBehaviour
         var background = new Color(.88f, .93f, .99f);
         Rect viewport = characterView.pixelRect;
         float top = Screen.height - viewport.yMax;
-        Surface(new Rect(0, 0, Screen.width, top + 1), background, 0);
+        Surface(new Rect(0, 0, Screen.width, settingsOpen ? Screen.height : top + 1), background, 0);
         Surface(new Rect(0, Screen.height - viewport.yMin - 1, Screen.width, viewport.yMin + 1), background, 0);
         GUI.matrix = Matrix4x4.TRS(new Vector3(safe.center.x - 195 * scale, Screen.height - safe.yMax, 0),
             Quaternion.identity, new Vector3(scale, scale, 1));
-        GUI.Label(new Rect(20, 3, 350, 39), "Chipi", title);
-        GUI.Label(new Rect(284, 10, 96, 23), "v" + Application.version, small);
+        GUI.Label(new Rect(125, height - FooterHeight, 140, FooterHeight), "Chipi · v" + Application.version, small);
 
         if (settingsOpen)
         {
-            DrawSettings(height);
+            DrawSettings();
             GUI.matrix = Matrix4x4.identity;
             return;
         }
 
-        float cardHeight = CardHeight(height);
-        DrawConversationCard(new Rect(24, height - ControlAreaHeight - cardHeight, 342, cardHeight));
+        float cardTop = CardTop(height);
+        DrawConversationCard(new Rect(16, cardTop, 358, CardHeight(height)));
+        height -= FooterHeight;
 
         string phaseLabel = phase switch
         {
@@ -1714,7 +1852,7 @@ public sealed class ChipiApp : MonoBehaviour
             else if (conversationActive && phase is VoicePhase.Speaking or VoicePhase.Thinking) InterruptReply();
             else if (conversationActive && phase == VoicePhase.Paused) SetMicrophoneMuted(false);
             else if (conversationActive) StopConversation("Conversation ended.");
-            else if (server)
+            else if (server || localVoice)
             {
                 conversationHistory.Clear();
                 conversationActive = true;
@@ -1768,14 +1906,14 @@ public sealed class ChipiApp : MonoBehaviour
             $"playback={playback} total={total} providerTiming={turn.timing}");
     }
 
-    private void DrawSettings(float height)
+    private void DrawSettings()
     {
-        Surface(new Rect(0, HeaderHeight, 390, height - HeaderHeight), new Color(.88f, .93f, .99f), 0);
-        float top = 84;
+        float top = 28;
         Surface(new Rect(24, top, 342, 262), Color.white, 22);
         GUI.Label(new Rect(36, top + 14, 318, 36), "Voice settings", body);
         GUI.Label(new Rect(42, top + 58, 306, 49),
-            server ? "Voice server is enabled." : "Connect to a test server to use the microphone.", small);
+            server ? "Voice server is enabled." : localVoice ? "On-device voice is enabled."
+                : "Connect to a test server to use the microphone.", small);
         if (GUI.Button(new Rect(42, top + 112, 306, 42), server ? "Change voice server" : "Connect voice server", secondary))
         {
 #if UNITY_IOS && !UNITY_EDITOR
@@ -1785,7 +1923,12 @@ public sealed class ChipiApp : MonoBehaviour
             settingsOpen = false;
 #endif
         }
-        if (server && GUI.Button(new Rect(42, top + 154, 306, 40), "Disconnect", secondary))
+        #if UNITY_IOS && !UNITY_EDITOR && !CHIPI_SIMULATOR_BUILD
+        const string disconnectLabel = "Use on-device voice";
+#else
+        const string disconnectLabel = "Disconnect";
+#endif
+        if (server && GUI.Button(new Rect(42, top + 154, 306, 40), disconnectLabel, secondary))
             SetServerEnabled(false);
         if (GUI.Button(new Rect(42, top + 202, 306, 44), "Done", secondary))
             settingsOpen = false;

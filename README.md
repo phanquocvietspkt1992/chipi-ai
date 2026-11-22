@@ -2,6 +2,13 @@
 
 Chipi là gia sư luyện nói tiếng Anh trên điện thoại. Mở project `Unity` bằng Unity 6000.6.7f1 và mở scene `Assets/Chipi.unity`. Nút **Try voice demo** phát câu trả lời mẫu ngay trong app. Chế độ này chạy offline.
 
+## Hội thoại trên iPhone không cần backend
+
+Bản iPhone dùng hội thoại trên thiết bị theo mặc định. Cần iOS 26 trở lên, iPhone hỗ trợ Apple Intelligence, Apple Intelligence đã bật và tải xong, cùng quyền Microphone và Speech Recognition. Chipi nhận diện tiếng Anh trên thiết bị, tạo câu trả lời bằng Foundation Models rồi đọc bằng giọng hệ thống. Luồng này không gọi Gemini và không cần Mac. Nếu đang dùng máy chủ thử nghiệm, chọn **Voice settings → Use on-device voice** để chuyển lại.
+
+Bản Simulator giữ luồng máy chủ thử nghiệm. Kiểm tra hội thoại trên thiết bị thật bằng cách bật chế độ máy bay sau khi Apple Intelligence đã sẵn sàng, sau đó nói hai lượt và xác nhận Chipi đọc hết từng câu, tự mở lại mic và giữ được ngữ cảnh.
+
+
 ## Chạy Phase 1 trên iPhone giả lập
 
 ```sh

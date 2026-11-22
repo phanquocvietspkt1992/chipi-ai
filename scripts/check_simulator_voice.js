@@ -55,6 +55,12 @@ const fixture = http.createServer((request, response) => {
             return;
         }
         response.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
+        if (request.url.startsWith('/speech-quota/')) {
+            response.end(event({ type: 'ready' }) +
+                event({ type: 'metadata', transcript: 'fixture', reply: 'I bought a new phone yesterday.', rate: 24000, mode: 'gemini' }) +
+                event({ type: 'error', status: 429, stage: 'speech_synthesis' }));
+            return;
+        }
         const delayed = request.url.startsWith('/slow/');
         const gap = request.url.startsWith('/gap/');
         const limited = request.url.startsWith('/limited/');
@@ -111,6 +117,10 @@ async function main() {
     await new Promise(resolve => fixture.listen(0, '127.0.0.1', resolve));
     const endpoint = 'http://127.0.0.1:' + fixture.address().port;
     simctl(['install', simulator, app]);
+    await check('speech-quota-system-voice', { CHIPI_CHECK_HISTORY: '1', CHIPI_CHECK_ENDPOINT: endpoint + '/speech-quota' },
+        'Chipi round trip finished:', text => text.includes('errorStage=speech_synthesis') &&
+            text.includes('playback.system_fallback') && text.includes('completed=True') &&
+            text.includes('Chipi history check completed: 2 remembered turns') && text.includes('state Ready'));
     await check('stream-tail', { CHIPI_CHECK_ROUND_TRIP: '1', CHIPI_CHECK_ENDPOINT: endpoint + '/normal' },
         'Chipi round trip finished:', text => {
             const match = text.match(/Chipi playback frames: received=(\d+), lastAudio=(\d+), position=(\d+), empty=(\d+), rate=(\d+)/);
