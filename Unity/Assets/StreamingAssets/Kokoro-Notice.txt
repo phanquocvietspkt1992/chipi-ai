@@ -1,0 +1,6 @@
+Chipi includes Kokoro-82M model weights and the af_heart voice from hexgrad,
+distributed under Apache License 2.0. The Core ML conversion and runtime
+are provided by Jud's KokoroCoreML under the same license.
+
+https://huggingface.co/hexgrad/Kokoro-82M
+https://github.com/Jud/kokoro-coreml

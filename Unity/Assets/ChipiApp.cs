@@ -16,6 +16,8 @@ public sealed class ChipiApp : MonoBehaviour
     [DllImport("__Internal")] private static extern void ChipiLocalSpeak([MarshalAs(UnmanagedType.LPUTF8Str)] string text);
     [DllImport("__Internal")] private static extern int ChipiLocalPlayback();
     [DllImport("__Internal")] private static extern void ChipiLocalCancel();
+    [DllImport("__Internal")] private static extern int ChipiLocalModelAvailability();
+    [DllImport("__Internal")] private static extern float ChipiLocalMouthOpening();
     [DllImport("__Internal")] private static extern void ChipiMicWatchBackground();
     [DllImport("__Internal")] private static extern int ChipiMicWasBackgrounded();
     [DllImport("__Internal")] private static extern void ChipiMicRequestPermission();
@@ -33,7 +35,6 @@ public sealed class ChipiApp : MonoBehaviour
     private const int MaxHistoryMessageLength = 1000;
     private readonly List<HistoryTurn> conversationHistory = new();
     private string Endpoint => PlayerPrefs.GetString("Endpoint", "http://127.0.0.1:8080");
-    private TouchScreenKeyboard addressEntry;
     private static readonly Color Ink = new(0.06f, 0.18f, 0.29f);
     private static readonly Color Blue = new(0.14f, 0.37f, 0.74f);
     private const float CharacterCardGap = 10f;
@@ -82,7 +83,6 @@ public sealed class ChipiApp : MonoBehaviour
     private bool settingsOpen;
     private const int PlaybackBufferMs = 1000;
     private bool server;
-    private bool localVoice;
 #if UNITY_IOS && !UNITY_EDITOR
     private bool localSpeaking;
 
@@ -274,28 +274,11 @@ public sealed class ChipiApp : MonoBehaviour
     private void Awake()
     {
         Application.targetFrameRate = 60;
-#if CHIPI_SIMULATOR_BUILD
-        const int defaultServer = 1;
+#if UNITY_IOS && !UNITY_EDITOR
+        Diagnostic($"apple.model_availability code={ChipiLocalModelAvailability()}");
 #else
-        const int defaultServer = 0;
+        server = PlayerPrefs.GetInt("VoiceServerEnabled", 0) == 1;
 #endif
-#if UNITY_IOS && DEVELOPMENT_BUILD && !CHIPI_SIMULATOR_BUILD
-        var phoneEndpoint = Environment.GetEnvironmentVariable("CHIPI_IPHONE_ENDPOINT");
-        var phoneToken = Environment.GetEnvironmentVariable("CHIPI_IPHONE_TOKEN");
-        if (!string.IsNullOrEmpty(phoneEndpoint) && !string.IsNullOrEmpty(phoneToken))
-        {
-            PlayerPrefs.SetString("Endpoint", phoneEndpoint);
-            PlayerPrefs.SetString("DeviceEndpoint", phoneEndpoint);
-            PlayerPrefs.SetString("DeviceToken", phoneToken);
-            PlayerPrefs.SetInt("VoiceServerEnabled", 1);
-            PlayerPrefs.SetInt("UseOnDeviceVoice", 0);
-            PlayerPrefs.Save();
-        }
-#endif
-#if UNITY_IOS && !UNITY_EDITOR && !CHIPI_SIMULATOR_BUILD
-        localVoice = PlayerPrefs.GetInt("UseOnDeviceVoice", 1) == 1;
-#endif
-        server = PlayerPrefs.GetInt("VoiceServerEnabled", defaultServer) == 1 && !localVoice;
         Screen.orientation = ScreenOrientation.Portrait;
         var view = new GameObject("Chipi camera").AddComponent<Camera>();
         view.gameObject.AddComponent<AudioListener>();
@@ -343,6 +326,18 @@ public sealed class ChipiApp : MonoBehaviour
             RunDemo();
             return;
         }
+#if DEVELOPMENT_BUILD && UNITY_IOS && !UNITY_EDITOR
+        if (Environment.GetEnvironmentVariable("CHIPI_CHECK_VOICE_COMPARISON") == "1")
+        {
+            StartCoroutine(CheckVoiceComparison());
+            return;
+        }
+        if (Environment.GetEnvironmentVariable("CHIPI_CHECK_APPLE_TURN") == "1")
+        {
+            StartCoroutine(CheckAppleTurn());
+            return;
+        }
+#endif
 #if DEVELOPMENT_BUILD || UNITY_EDITOR
     if (Environment.GetEnvironmentVariable("CHIPI_CHECK_MULTITURN") == "1")
     {
@@ -373,7 +368,11 @@ public sealed class ChipiApp : MonoBehaviour
             return;
         }
 #endif
+#if UNITY_IOS && !UNITY_EDITOR
+        StartCoroutine(PlayAppleSample(reply, ""));
+#else
         StartCoroutine(Speak(Resources.Load<AudioClip>("Greeting"), ""));
+#endif
     }
 
     private void AddContactShadow()
@@ -433,20 +432,6 @@ public sealed class ChipiApp : MonoBehaviour
 
     private void Update()
     {
-        if (addressEntry != null && addressEntry.status != TouchScreenKeyboard.Status.Visible)
-        {
-            if (addressEntry.status == TouchScreenKeyboard.Status.Done &&
-                Uri.TryCreate(addressEntry.text.Trim(), UriKind.Absolute, out var address) &&
-                (address.Scheme == "https" || address.Scheme == "http") && string.IsNullOrEmpty(address.UserInfo))
-            {
-                PlayerPrefs.SetString("Endpoint", address.ToString().TrimEnd('/'));
-                PlayerPrefs.Save();
-                SetServerEnabled(true);
-                status = "Voice server configured.";
-                settingsOpen = false;
-            }
-            addressEntry = null;
-        }
         if (recording == null) return;
         int frames = CapturePosition();
         UpdateMicLevel(frames);
@@ -523,7 +508,7 @@ public sealed class ChipiApp : MonoBehaviour
                 round = (1 - Mathf.InverseLerp(.11f, .4f, Mathf.Sqrt(edges / squares))) * Mathf.Sqrt(open);
         }
 #if UNITY_IOS && !UNITY_EDITOR
-        if (localSpeaking) open = .18f + .34f * Mathf.Abs(Mathf.Sin(Time.unscaledTime * 17f));
+        if (localSpeaking) open = ChipiLocalMouthOpening();
 #endif
         float response = open > jaw ? 26f : 15f;
         jaw = Mathf.Lerp(jaw, open, 1 - Mathf.Exp(-Time.deltaTime * response));
@@ -882,7 +867,7 @@ public sealed class ChipiApp : MonoBehaviour
         double captureStopped = -1, int pauseMs = -1, string diagnosticId = null)
     {
 #if UNITY_IOS && !UNITY_EDITOR
-        if (localVoice && endpointOverride == null)
+        if (endpointOverride == null)
         {
             yield return SendLocal(wav);
             yield break;
@@ -1029,7 +1014,7 @@ public sealed class ChipiApp : MonoBehaviour
                     transcript = streamed.transcript;
                     reply = streamed.reply;
                     bool spoken = false;
-                    yield return SpeakWithSystemVoice(reply, requestStarted, success => spoken = success);
+                    yield return SpeakWithLocalVoice(reply, requestStarted, success => spoken = success);
                     Diagnostic($"playback.system_fallback id={diagnosticId} completed={spoken}");
                     if (spoken)
                     {
@@ -1116,6 +1101,7 @@ public sealed class ChipiApp : MonoBehaviour
             yield return null;
 
         LocalReply answer = size > 0 ? JsonUtility.FromJson<LocalReply>(Encoding.UTF8.GetString(result, 0, size)) : null;
+        if (!string.IsNullOrWhiteSpace(answer?.transcript)) transcript = answer.transcript;
         if (answer == null || !string.IsNullOrEmpty(answer.error) || string.IsNullOrWhiteSpace(answer.reply))
         {
             CancelLocalVoice();
@@ -1123,10 +1109,9 @@ public sealed class ChipiApp : MonoBehaviour
             yield break;
         }
 
-        transcript = answer.transcript;
         reply = answer.reply;
         bool spoken = false;
-        yield return SpeakWithSystemVoice(reply, started, success => spoken = success);
+        yield return SpeakWithLocalVoice(reply, started, success => spoken = success);
         if (!spoken)
         {
             FailTurn("On-device playback was interrupted. Try again.");
@@ -1137,13 +1122,59 @@ public sealed class ChipiApp : MonoBehaviour
         yield return RearmConversation();
     }
 
-    private IEnumerator SpeakWithSystemVoice(string text, double started, Action<bool> completed)
+#if DEVELOPMENT_BUILD
+    private IEnumerator CheckVoiceComparison()
+    {
+        string[] lines =
+        {
+            "Hello, how can I help you?",
+            "Nice! You’d say, I bought a new phone yesterday.",
+            "That sounds tiring. I hope you get some rest tonight."
+        };
+        foreach (string line in lines)
+        {
+            reply = line;
+            yield return PlayAppleSample(line, "");
+            if (!string.IsNullOrEmpty(status))
+            {
+                Diagnostic("voice.comparison FAIL");
+                yield break;
+            }
+        }
+        Diagnostic("voice.comparison PASS");
+    }
+
+    private IEnumerator CheckAppleTurn()
+    {
+        yield return PlayAppleSample(reply, "");
+        bool greetingPlayed = string.IsNullOrEmpty(status);
+        var clip = Resources.Load<AudioClip>("DemoReply");
+        yield return SendLocal(Encode(clip, clip.samples));
+        bool passed = greetingPlayed && !string.IsNullOrWhiteSpace(transcript) &&
+            string.IsNullOrEmpty(status) && phase == VoicePhase.Ready;
+        Diagnostic($"apple.fixture_turn {(passed ? "PASS" : "FAIL")} status={status}");
+    }
+#endif
+
+    private IEnumerator PlayAppleSample(string text, string label)
+    {
+        busy = true;
+        bool spoken = false;
+        yield return SpeakWithLocalVoice(text, Time.realtimeSinceStartupAsDouble, success => spoken = success);
+        busy = false;
+        phase = VoicePhase.Ready;
+        status = spoken ? label : "Chipi’s voice couldn’t play.";
+        Play("Idle");
+        Diagnostic($"apple.sample_finished completed={spoken}");
+    }
+
+    private IEnumerator SpeakWithLocalVoice(string text, double started, Action<bool> completed)
     {
         ChipiAudioPlayback();
         ChipiLocalSpeak(text);
         double queued = Time.realtimeSinceStartupAsDouble;
         int state;
-        while ((state = ChipiLocalPlayback()) == 1 && Time.realtimeSinceStartupAsDouble - queued < 8)
+        while ((state = ChipiLocalPlayback()) == 1 && Time.realtimeSinceStartupAsDouble - queued < 30)
             yield return null;
         if (state == 2)
         {
@@ -1363,10 +1394,6 @@ public sealed class ChipiApp : MonoBehaviour
     private void SetServerEnabled(bool enabled)
     {
         server = enabled;
-#if UNITY_IOS && !UNITY_EDITOR && !CHIPI_SIMULATOR_BUILD
-        localVoice = !enabled;
-        PlayerPrefs.SetInt("UseOnDeviceVoice", localVoice ? 1 : 0);
-#endif
         PlayerPrefs.SetInt("VoiceServerEnabled", enabled ? 1 : 0);
         PlayerPrefs.Save();
     }
@@ -1645,7 +1672,11 @@ public sealed class ChipiApp : MonoBehaviour
     {
         transcript = "Demo: I like apples.";
         reply = "Nice! What is your favorite fruit?";
+#if UNITY_IOS && !UNITY_EDITOR
+        StartCoroutine(PlayAppleSample(reply, "Voice sample"));
+#else
         StartCoroutine(Speak(Resources.Load<AudioClip>("DemoReply"), "Offline voice demo"));
+#endif
     }
 
     private static void Surface(Rect rect, Color color, float radius)
@@ -1852,17 +1883,7 @@ public sealed class ChipiApp : MonoBehaviour
             else if (conversationActive && phase is VoicePhase.Speaking or VoicePhase.Thinking) InterruptReply();
             else if (conversationActive && phase == VoicePhase.Paused) SetMicrophoneMuted(false);
             else if (conversationActive) StopConversation("Conversation ended.");
-            else if (server || localVoice)
-            {
-                conversationHistory.Clear();
-                conversationActive = true;
-                StartCoroutine(BeginCapture());
-            }
-            else
-            {
-                status = "Set up a voice server, or try the demo.";
-                settingsOpen = true;
-            }
+            else StartConversation();
         }
 
         if (conversationActive)
@@ -1885,7 +1906,7 @@ public sealed class ChipiApp : MonoBehaviour
         }
         else if (!conversationActive && !busy && recording == null)
         {
-            if (GUI.Button(new Rect(28, height - 46, 169, 44), "Try voice demo", secondary)) RunDemo();
+            if (GUI.Button(new Rect(28, height - 46, 169, 44), "Try voice sample", secondary)) RunDemo();
             if (GUI.Button(new Rect(198, height - 46, 164, 44), "Voice settings", secondary)) settingsOpen = true;
         }
         GUI.matrix = Matrix4x4.identity;
@@ -1906,30 +1927,58 @@ public sealed class ChipiApp : MonoBehaviour
             $"playback={playback} total={total} providerTiming={turn.timing}");
     }
 
+    private void StartConversation()
+    {
+#if UNITY_IOS && !UNITY_EDITOR
+        int availability = ChipiLocalModelAvailability();
+        if (availability != 0)
+        {
+            status = availability switch
+            {
+                1 => "Conversation requires iOS 26 or later.",
+#if CHIPI_SIMULATOR_BUILD
+                _ => "Apple Intelligence is unavailable here. Try the voice sample.",
+#else
+                2 => "This iPhone doesn’t support Apple Intelligence.",
+                3 => "Turn on Apple Intelligence in Settings.",
+                4 => "Apple Intelligence isn’t ready yet. Try again later.",
+                _ => "Apple Intelligence is unavailable. Try again later."
+#endif
+            };
+            return;
+        }
+#else
+        if (!server)
+        {
+            status = "Set up a voice server, or try the demo.";
+            settingsOpen = true;
+            return;
+        }
+#endif
+        conversationHistory.Clear();
+        conversationActive = true;
+        StartCoroutine(BeginCapture());
+    }
+
     private void DrawSettings()
     {
         float top = 28;
         Surface(new Rect(24, top, 342, 262), Color.white, 22);
         GUI.Label(new Rect(36, top + 14, 318, 36), "Voice settings", body);
+#if UNITY_IOS && !UNITY_EDITOR
+        GUI.Label(new Rect(42, top + 58, 306, 88),
+            "Chipi uses Apple Intelligence for replies and one offline English voice for speech.", small);
+#else
         GUI.Label(new Rect(42, top + 58, 306, 49),
-            server ? "Voice server is enabled." : localVoice ? "On-device voice is enabled."
-                : "Connect to a test server to use the microphone.", small);
+            server ? "Voice server is enabled." : "Connect to a test server to use the microphone.", small);
         if (GUI.Button(new Rect(42, top + 112, 306, 42), server ? "Change voice server" : "Connect voice server", secondary))
         {
-#if UNITY_IOS && !UNITY_EDITOR
-            addressEntry = TouchScreenKeyboard.Open(Endpoint, TouchScreenKeyboardType.URL);
-#else
             SetServerEnabled(true);
             settingsOpen = false;
-#endif
         }
-        #if UNITY_IOS && !UNITY_EDITOR && !CHIPI_SIMULATOR_BUILD
-        const string disconnectLabel = "Use on-device voice";
-#else
-        const string disconnectLabel = "Disconnect";
-#endif
-        if (server && GUI.Button(new Rect(42, top + 154, 306, 40), disconnectLabel, secondary))
+        if (server && GUI.Button(new Rect(42, top + 154, 306, 40), "Disconnect", secondary))
             SetServerEnabled(false);
+#endif
         if (GUI.Button(new Rect(42, top + 202, 306, 44), "Done", secondary))
             settingsOpen = false;
     }

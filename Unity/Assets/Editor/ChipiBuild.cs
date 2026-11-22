@@ -182,7 +182,7 @@ public static class ChipiBuild
         CheckVoiceEndpoint();
         IncrementVersion();
         PlayerSettings.SetApplicationIdentifier(UnityEditor.Build.NamedBuildTarget.iOS, "com.chipi.prototype");
-        PlayerSettings.iOS.targetOSVersionString = "16.0";
+        PlayerSettings.iOS.targetOSVersionString = "18.0";
         bool simulator = Environment.GetEnvironmentVariable("CHIPI_IOS_SIMULATOR") == "1";
         PlayerSettings.iOS.sdkVersion = simulator ? iOSSdkVersion.SimulatorSDK : iOSSdkVersion.DeviceSDK;
         if (simulator) PlayerSettings.iOS.simulatorSdkArchitecture = AppleMobileArchitectureSimulator.ARM64;

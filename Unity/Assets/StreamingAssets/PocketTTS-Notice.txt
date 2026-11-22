@@ -1,0 +1,12 @@
+Chipi uses the English 18M Pocket TTS model and Alba voice by Kyutai,
+converted to Core ML by FluidInference. Chipi distributes the selected model
+files and voice without changing their weights.
+
+Pocket TTS by Kyutai: https://huggingface.co/kyutai/pocket-tts
+Core ML conversion: https://huggingface.co/FluidInference/pocket-tts-coreml/tree/c2e998e269e4d4b51f74061faddb8450cd8f9a9a
+Model pack license: Creative Commons Attribution 4.0 International
+https://creativecommons.org/licenses/by/4.0/
+
+The FluidAudio runtime by FluidInference is licensed under Apache License 2.0.
+See Kokoro-Apache-2.0.txt for the shared license text.
+https://github.com/FluidInference/FluidAudio

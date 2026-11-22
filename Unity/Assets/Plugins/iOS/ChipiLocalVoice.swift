@@ -1,24 +1,107 @@
 import AVFoundation
 import Foundation
 import FoundationModels
+import FluidAudio
+#if targetEnvironment(simulator)
+import KokoroCoreML
+#endif
 import Speech
 
+private actor NeuralVoice {
+#if targetEnvironment(simulator)
+    nonisolated static let compareKokoro = ProcessInfo.processInfo.environment["CHIPI_COMPARE_KOKORO"] == "1"
+    private var engine: KokoroEngine?
+    private let pocket = PocketTtsSmallManager(model: .english18m, defaultVoice: "alba", computeUnits: .cpuOnly)
+#else
+    private let pocket = PocketTtsSmallManager(model: .english18m, defaultVoice: "alba")
+#endif
+
+    nonisolated static var name: String {
+#if targetEnvironment(simulator)
+        if compareKokoro { return "kokoro/af_heart" }
+#endif
+        return "pocket/alba"
+    }
+
+    func render(_ text: String) async throws -> Data {
+#if targetEnvironment(simulator)
+        if Self.compareKokoro { return try renderKokoro(text) }
+#endif
+        guard let resources = Bundle.main.resourceURL else { throw CocoaError(.fileNoSuchFile) }
+        if await !pocket.isInitialized {
+            try await pocket.load(from: resources.appendingPathComponent("ChipiPocketVoice"))
+        }
+        try Task.checkCancellation()
+        let wav = try await pocket.synthesize(text: text, seed: 42)
+        try Task.checkCancellation()
+        guard wav.count > 44, wav.count <= 44 + 24_000 * 2 * 45 else {
+            throw CocoaError(.coderInvalidValue)
+        }
+        return wav
+    }
+
+#if targetEnvironment(simulator)
+    private func renderKokoro(_ text: String) throws -> Data {
+        if engine == nil {
+            guard let resources = Bundle.main.resourceURL else {
+                throw CocoaError(.fileNoSuchFile)
+            }
+            engine = try KokoroEngine(modelDirectory: resources.appendingPathComponent("ChipiNeuralVoice"),
+                                      forceCPU: true)
+        }
+        guard let engine else { throw CocoaError(.fileNoSuchFile) }
+        try Task.checkCancellation()
+        let result = try engine.synthesize(text: text, voice: "af_heart", speed: 0.96)
+        try Task.checkCancellation()
+        let samples = result.samples
+        guard !samples.isEmpty, samples.count <= KokoroEngine.sampleRate * 45 else {
+            throw CocoaError(.coderInvalidValue)
+        }
+        var data = Data()
+        func append<T: FixedWidthInteger>(_ value: T) {
+            var littleEndian = value.littleEndian
+            withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+        }
+        let bytes = UInt32(samples.count * 2)
+        let rate = UInt32(KokoroEngine.sampleRate)
+        data.reserveCapacity(44 + Int(bytes))
+        data.append(contentsOf: "RIFF".utf8)
+        append(bytes + 36)
+        data.append(contentsOf: "WAVEfmt ".utf8)
+        append(UInt32(16))
+        append(UInt16(1))
+        append(UInt16(1))
+        append(rate)
+        append(rate * 2)
+        append(UInt16(2))
+        append(UInt16(16))
+        data.append(contentsOf: "data".utf8)
+        append(bytes)
+        var pcm = samples.map { sample -> Int16 in
+            guard sample.isFinite else { return 0 }
+            return Int16(min(1, max(-1, sample)) * 32_767).littleEndian
+        }
+        pcm.withUnsafeMutableBytes { data.append(contentsOf: $0) }
+        return data
+    }
+#endif
+}
+
 @MainActor
-private final class LocalVoice: NSObject, AVSpeechSynthesizerDelegate {
+private final class LocalVoice: NSObject, AVAudioPlayerDelegate {
     static let shared = LocalVoice()
-    private let speaker = AVSpeechSynthesizer()
-    private var utterance: AVSpeechUtterance?
+    private let neuralVoice = NeuralVoice()
+    private var player: AVAudioPlayer?
+    private var speechTask: Task<Void, Never>?
+#if targetEnvironment(simulator)
+    private var sampleNumber = 0
+#endif
     private var recognition: SFSpeechRecognitionTask?
     private var generation: Task<Void, Never>?
     private var recording: URL?
     private var turn = UUID()
     var result = ""
     var playback: Int32 = 0
-
-    override init() {
-        super.init()
-        speaker.delegate = self
-    }
 
     func cancel() {
         turn = UUID()
@@ -28,8 +111,10 @@ private final class LocalVoice: NSObject, AVSpeechSynthesizerDelegate {
         generation = nil
         if let recording { try? FileManager.default.removeItem(at: recording) }
         recording = nil
-        utterance = nil
-        speaker.stopSpeaking(at: .immediate)
+        speechTask?.cancel()
+        speechTask = nil
+        player?.stop()
+        player = nil
         playback = 0
         result = ""
     }
@@ -48,12 +133,9 @@ private final class LocalVoice: NSObject, AVSpeechSynthesizerDelegate {
     func start(_ wav: Data, context: String) {
         cancel()
         let id = turn
-        guard #available(iOS 26.0, *) else {
-            finish(["error": "On-device conversation requires iOS 26 or later."], id: id)
-            return
-        }
-        guard case .available = SystemLanguageModel.default.availability else {
-            finish(["error": "On-device replies need Apple Intelligence. Check its availability in Settings."], id: id)
+        let availability = Self.modelAvailability()
+        guard #available(iOS 26.0, *), availability == 0 else {
+            finish(["error": "Apple Intelligence isn’t available for this conversation."], id: id)
             return
         }
         SFSpeechRecognizer.requestAuthorization { permission in
@@ -123,39 +205,79 @@ private final class LocalVoice: NSObject, AVSpeechSynthesizerDelegate {
                 if reply.isEmpty { throw CocoaError(.coderInvalidValue) }
                 finish(["transcript": heard, "reply": reply], id: id)
             } catch {
-                finish(["error": "Chipi couldn't generate an on-device reply. Try again."], id: id)
+                guard turn == id, !Task.isCancelled else { return }
+                let details = error as NSError
+                NSLog("Chipi Apple reply failed: domain=%@ code=%ld", details.domain, details.code)
+#if targetEnvironment(simulator)
+                let message = "Apple Intelligence couldn’t reply on this simulator."
+#else
+                let message = "Apple Intelligence couldn’t finish this reply. Try again."
+#endif
+                finish(["transcript": heard, "error": message], id: id)
             }
         }
     }
 
-    func speak(_ text: String) {
-        let item = AVSpeechUtterance(string: text)
-        item.voice = AVSpeechSynthesisVoice(language: "en-US")
-        item.rate = AVSpeechUtteranceDefaultSpeechRate
-        utterance = item
-        playback = 1
-        speaker.speak(item)
-    }
-
-    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
-        updatePlayback(utterance, state: 2)
-    }
-
-    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        updatePlayback(utterance, state: 3)
-    }
-
-    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
-        updatePlayback(utterance, state: -1)
-    }
-
-    private nonisolated func updatePlayback(_ utterance: AVSpeechUtterance, state: Int32) {
-        let identity = ObjectIdentifier(utterance)
-        Task { @MainActor in
-            guard let current = self.utterance, ObjectIdentifier(current) == identity else { return }
-            self.playback = state
+    static func modelAvailability() -> Int32 {
+        guard #available(iOS 26.0, *) else { return 1 }
+        switch SystemLanguageModel.default.availability {
+        case .available: return 0
+        case .unavailable(.deviceNotEligible): return 2
+        case .unavailable(.appleIntelligenceNotEnabled): return 3
+        case .unavailable(.modelNotReady): return 4
+        default: return 5
         }
     }
+
+    var mouthOpening: Float {
+        guard playback == 2, let player else { return 0 }
+        player.updateMeters()
+        return max(0, min(0.65, (player.averagePower(forChannel: 0) + 44) / 40))
+    }
+
+    func speak(_ text: String) {
+        speechTask?.cancel()
+        player?.stop()
+        player = nil
+        playback = 1
+        let started = ProcessInfo.processInfo.systemUptime
+        speechTask = Task {
+            do {
+                let wav = try await neuralVoice.render(text)
+                try Task.checkCancellation()
+#if targetEnvironment(simulator)
+                if ProcessInfo.processInfo.environment["CHIPI_EXPORT_NEURAL_SAMPLE"] == "1" {
+                    sampleNumber += 1
+                    let filename = "ChipiVoiceSample-\(sampleNumber).wav"
+                    let sample = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+                    try? wav.write(to: sample, options: .atomic)
+                }
+#endif
+                let audio = try AVAudioPlayer(data: wav)
+                audio.delegate = self
+                audio.isMeteringEnabled = true
+                player = audio
+                guard audio.play() else { throw CocoaError(.fileReadUnknown) }
+                playback = 2
+                NSLog("Chipi neural voice started: voice=%@ synthesisMs=%.0f durationMs=%.0f", NeuralVoice.name,
+                      (ProcessInfo.processInfo.systemUptime - started) * 1000, audio.duration * 1000)
+            } catch {
+                guard !Task.isCancelled else { return }
+                let details = error as NSError
+                NSLog("Chipi neural voice failed: domain=%@ code=%ld", details.domain, details.code)
+                playback = -1
+            }
+        }
+    }
+
+    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        let identity = ObjectIdentifier(player)
+        Task { @MainActor in
+            guard let current = self.player, ObjectIdentifier(current) == identity else { return }
+            self.playback = flag ? 3 : -1
+        }
+    }
+
 }
 
 @_cdecl("ChipiLocalStart")
@@ -187,4 +309,14 @@ func chipiLocalPlayback() -> Int32 {
 @_cdecl("ChipiLocalCancel")
 func chipiLocalCancel() {
     MainActor.assumeIsolated { LocalVoice.shared.cancel() }
+}
+
+@_cdecl("ChipiLocalModelAvailability")
+func chipiLocalModelAvailability() -> Int32 {
+    MainActor.assumeIsolated { LocalVoice.modelAvailability() }
+}
+
+@_cdecl("ChipiLocalMouthOpening")
+func chipiLocalMouthOpening() -> Float {
+    MainActor.assumeIsolated { LocalVoice.shared.mouthOpening }
 }
