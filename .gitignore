@@ -1,0 +1,13 @@
+.DS_Store
+.env
+.env.*
+*.blend1
+/backend/target/
+/Unity/Library/
+/Unity/Logs/
+/Unity/Temp/
+/Unity/UserSettings/
+/build/
+
+/Unity/.utmp/
+/Unity/build/
