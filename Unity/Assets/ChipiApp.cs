@@ -11,7 +11,10 @@ public sealed class ChipiApp : MonoBehaviour
 {
 #if UNITY_IOS && !UNITY_EDITOR
     [DllImport("__Internal")] private static extern int ChipiAudioPlayback();
-    [DllImport("__Internal")] private static extern void ChipiLocalStart(byte[] wav, int size, [MarshalAs(UnmanagedType.LPUTF8Str)] string context);
+    [DllImport("__Internal")] private static extern void ChipiLocalStart(byte[] wav, int size, int useMemory);
+    [DllImport("__Internal")] private static extern int ChipiLocalReadLatest([Out] byte[] result, int size);
+    [DllImport("__Internal")] private static extern int ChipiLocalRemember([MarshalAs(UnmanagedType.LPUTF8Str)] string transcript,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string reply);
     [DllImport("__Internal")] private static extern int ChipiLocalRead([Out] byte[] result, int size);
     [DllImport("__Internal")] private static extern void ChipiLocalSpeak([MarshalAs(UnmanagedType.LPUTF8Str)] string text);
     [DllImport("__Internal")] private static extern int ChipiLocalPlayback();
@@ -81,6 +84,7 @@ public sealed class ChipiApp : MonoBehaviour
     private enum VoicePhase { Ready, RequestingMicrophone, Listening, Thinking, Speaking, Paused }
     private VoicePhase phase;
     private bool settingsOpen;
+    private bool hasSavedConversation;
     private const int PlaybackBufferMs = 1000;
     private bool server;
 #if UNITY_IOS && !UNITY_EDITOR
@@ -98,7 +102,7 @@ public sealed class ChipiApp : MonoBehaviour
     private string transcript = "";
     private string reply = "Hello, how can I help you?";
     private bool stylesReady;
-    private GUIStyle body, small, dialogueReply, dialogueTranscript, primary, secondary, phaseStyle;
+    private GUIStyle body, small, dialogueText, dialogueSpeaker, primary, secondary, phaseStyle;
     private string displayedReply, displayedTranscript;
     private float dialogueOffset, touchStartY, touchStartOffset;
     private readonly float[] output = new float[256];
@@ -369,7 +373,16 @@ public sealed class ChipiApp : MonoBehaviour
         }
 #endif
 #if UNITY_IOS && !UNITY_EDITOR
-        StartCoroutine(PlayAppleSample(reply, ""));
+        var latest = new byte[8192];
+        int size = ChipiLocalReadLatest(latest, latest.Length);
+        if (size > 0)
+        {
+            var saved = JsonUtility.FromJson<LocalReply>(Encoding.UTF8.GetString(latest, 0, size));
+            transcript = saved.transcript;
+            reply = saved.reply;
+            hasSavedConversation = true;
+        }
+        StartCoroutine(PlayAppleSample(hasSavedConversation ? "Welcome back. Ready to pick up where we left off?" : reply, ""));
 #else
         StartCoroutine(Speak(Resources.Load<AudioClip>("Greeting"), ""));
 #endif
@@ -1092,16 +1105,19 @@ public sealed class ChipiApp : MonoBehaviour
         phase = VoicePhase.Thinking;
         status = "";
         Play("Idle");
-        var context = JsonUtility.ToJson(new TurnHistory { turns = conversationHistory.ToArray() });
         double started = Time.realtimeSinceStartupAsDouble;
-        ChipiLocalStart(wav, wav.Length, context);
+        ChipiLocalStart(wav, wav.Length, conversationActive ? 1 : 0);
         var result = new byte[8192];
         int size = 0;
         while (Time.realtimeSinceStartupAsDouble - started < 60 && (size = ChipiLocalRead(result, result.Length)) == 0)
             yield return null;
 
         LocalReply answer = size > 0 ? JsonUtility.FromJson<LocalReply>(Encoding.UTF8.GetString(result, 0, size)) : null;
-        if (!string.IsNullOrWhiteSpace(answer?.transcript)) transcript = answer.transcript;
+        if (!string.IsNullOrWhiteSpace(answer?.transcript))
+        {
+            transcript = answer.transcript;
+            reply = "";
+        }
         if (answer == null || !string.IsNullOrEmpty(answer.error) || string.IsNullOrWhiteSpace(answer.reply))
         {
             CancelLocalVoice();
@@ -1118,7 +1134,17 @@ public sealed class ChipiApp : MonoBehaviour
             yield break;
         }
         retryAudio = null;
-        RememberTurn(conversationActive);
+        bool saved = !conversationActive || ChipiLocalRemember(transcript, reply) != 0;
+        if (conversationActive && saved) hasSavedConversation = true;
+        if (!saved)
+        {
+            microphoneMuted = true;
+            phase = VoicePhase.Paused;
+            busy = false;
+            status = "This exchange couldn’t be saved. You can resume speaking.";
+            Play("Idle");
+            yield break;
+        }
         yield return RearmConversation();
     }
 
@@ -1704,7 +1730,7 @@ public sealed class ChipiApp : MonoBehaviour
         Mathf.Min(safe.width / 390f, safe.height / 760f);
 
     private static float CardHeight(float height) =>
-        Mathf.Clamp(height * .39f, 285f, 338f) + 20f;
+        Mathf.Clamp(height * .46f, 325f, 390f) + 20f;
 
     private static float CardTop(float height) =>
         height - FooterHeight - ControlAreaHeight - CardHeight(height);
@@ -1723,51 +1749,53 @@ public sealed class ChipiApp : MonoBehaviour
 
     private void DrawConversationCard(Rect card)
     {
+        const float messageGap = 10;
+        const float sideInset = 18;
         Surface(card, Color.white, 22);
-        var viewport = new Rect(card.x + 15, card.y + 12, card.width - 30, card.height - 24);
-        var replyContent = new GUIContent(reply ?? "");
-        var transcriptContent = new GUIContent(transcript ?? "");
-        bool hasReply = !string.IsNullOrWhiteSpace(reply);
-        bool hasTranscript = !string.IsNullOrWhiteSpace(transcript);
-        float separator = hasReply && hasTranscript ? 17 : 0;
-        GUIStyle replyStyle = hasTranscript ? dialogueReply : body;
-
-        float textWidth = viewport.width;
-        float replyHeight = hasReply ? replyStyle.CalcHeight(replyContent, textWidth) : 0;
-        float transcriptHeight = hasTranscript ? dialogueTranscript.CalcHeight(transcriptContent, textWidth) : 0;
-        if (replyHeight + separator + transcriptHeight > viewport.height)
-        {
-            textWidth -= 12;
-            replyHeight = hasReply ? replyStyle.CalcHeight(replyContent, textWidth) : 0;
-            transcriptHeight = hasTranscript ? dialogueTranscript.CalcHeight(transcriptContent, textWidth) : 0;
-        }
-
-        float contentHeight = replyHeight + separator + transcriptHeight;
+        var viewport = new Rect(card.x + 12, card.y + 12, card.width - 24, card.height - 24);
+        var learner = new GUIContent(transcript ?? "");
+        var chipi = new GUIContent(reply ?? "");
+        bool hasLearner = !string.IsNullOrWhiteSpace(transcript);
+        bool hasChipi = !string.IsNullOrWhiteSpace(reply);
+        float messageWidth = viewport.width - sideInset - 8;
+        float learnerHeight = hasLearner ? DialogueMessageHeight(learner, messageWidth) : 0;
+        float replyTop = learnerHeight + (hasLearner && hasChipi ? messageGap : 0);
+        float replyHeight = hasChipi ? DialogueMessageHeight(chipi, messageWidth) : 0;
+        float contentHeight = replyTop + replyHeight;
         float maxOffset = Mathf.Max(0, contentHeight - viewport.height);
         if (displayedReply != reply || displayedTranscript != transcript)
         {
             displayedReply = reply;
             displayedTranscript = transcript;
-            dialogueOffset = 0;
+            // Keep the start of Chipi's reply visible when a long transcript fills the card.
+            dialogueOffset = hasChipi ? Mathf.Min(replyTop, maxOffset) : 0;
         }
         UpdateDialogueScroll(viewport, maxOffset);
-        float top = maxOffset > 0 ? -dialogueOffset : (viewport.height - contentHeight) / 2;
 
         GUI.BeginGroup(viewport);
-        if (hasReply)
-            GUI.Label(new Rect(0, top, textWidth, replyHeight), replyContent, replyStyle);
-        if (separator > 0)
-            Surface(new Rect(8, top + replyHeight + 8, textWidth - 16, 1), new Color(.88f, .92f, .97f), 0);
-        if (hasTranscript)
-            GUI.Label(new Rect(0, top + replyHeight + separator, textWidth, transcriptHeight),
-                transcriptContent, dialogueTranscript);
+        if (hasLearner)
+            DrawDialogueMessage(new Rect(sideInset, -dialogueOffset, messageWidth, learnerHeight),
+                "You", learner, new Color(.91f, .94f, .98f));
+        if (hasChipi)
+            DrawDialogueMessage(new Rect(0, replyTop - dialogueOffset, messageWidth, replyHeight),
+                "Chipi", chipi, new Color(.95f, .97f, 1f));
         if (maxOffset > 0)
         {
-            float thumbHeight = Mathf.Max(18, viewport.height * viewport.height / contentHeight);
+            float thumbHeight = Mathf.Min(viewport.height, Mathf.Max(20, viewport.height * viewport.height / contentHeight));
             float thumbY = (viewport.height - thumbHeight) * dialogueOffset / maxOffset;
-            Surface(new Rect(viewport.width - 3, thumbY, 3, thumbHeight), new Color(.65f, .74f, .86f), 1.5f);
+            Surface(new Rect(viewport.width - 3, thumbY, 3, thumbHeight), new Color(.53f, .65f, .82f), 1.5f);
         }
         GUI.EndGroup();
+    }
+
+    private float DialogueMessageHeight(GUIContent message, float width) =>
+        47 + dialogueText.CalcHeight(message, width - 24);
+
+    private void DrawDialogueMessage(Rect bubble, string speakerName, GUIContent message, Color background)
+    {
+        Surface(bubble, background, 14);
+        GUI.Label(new Rect(bubble.x + 12, bubble.y + 8, bubble.width - 24, 24), speakerName, dialogueSpeaker);
+        GUI.Label(new Rect(bubble.x + 12, bubble.y + 36, bubble.width - 24, bubble.height - 47), message, dialogueText);
     }
 
     private void UpdateDialogueScroll(Rect viewport, float maxOffset)
@@ -1807,10 +1835,10 @@ public sealed class ChipiApp : MonoBehaviour
         {
             body = Label(19, Ink, true);
             small = Label(13, Ink);
-            dialogueReply = Label(19, Ink, true);
-            dialogueReply.alignment = TextAnchor.UpperLeft;
-            dialogueTranscript = Label(15, new Color(.19f, .31f, .46f));
-            dialogueTranscript.alignment = TextAnchor.UpperLeft;
+            dialogueText = Label(20, Ink);
+            dialogueText.alignment = TextAnchor.UpperLeft;
+            dialogueSpeaker = Label(14, Blue, true);
+            dialogueSpeaker.alignment = TextAnchor.UpperLeft;
             primary = Label(18, Color.white, true);
             secondary = Label(14, Blue, true);
             phaseStyle = Label(14, Blue, true);
@@ -1870,7 +1898,7 @@ public sealed class ChipiApp : MonoBehaviour
             listening ? "Send now" : retrying ? "Retry" : conversationActive && phase == VoicePhase.Speaking ? "Interrupt"
                 : conversationActive && phase == VoicePhase.Thinking ? "Cancel response"
                 : conversationActive && phase == VoicePhase.Paused ? "Resume" : conversationActive ? "End conversation"
-                : phase == VoicePhase.Ready ? "Start conversation" : phaseLabel, primary);
+                : phase == VoicePhase.Ready ? (hasSavedConversation ? "Continue conversation" : "Start conversation") : phaseLabel, primary);
         if ((!busy || conversationActive) && GUI.Button(talk, GUIContent.none, GUIStyle.none))
         {
             if (recording != null)

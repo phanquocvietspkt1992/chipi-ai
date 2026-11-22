@@ -8,6 +8,19 @@ Bản iPhone dùng Apple Speech để nhận diện giọng nói trên thiết b
 
 Bản giả lập chạy không cần máy chủ. **Try voice sample** kiểm tra giọng nói Pocket TTS. **Start conversation** cần mô hình Apple Intelligence khả dụng. Kiểm tra toàn bộ luồng trên iPhone thật bằng cách bật chế độ máy bay sau khi Apple Intelligence đã sẵn sàng, nói hai lượt và xác nhận Chipi đọc hết câu, mở lại mic và giữ được ngữ cảnh.
 
+### Nhớ cuộc trò chuyện
+
+Bản iPhone lưu trọn văn bản của từng lượt đã phát xong vào bộ nhớ riêng của app. **End conversation** chỉ dừng phiên nghe. Khi mở lại, Chipi hiển thị lượt gần nhất và nút **Continue conversation**. Mỗi câu trả lời có thể dùng vài lượt gần nhất và những lượt cũ có từ khóa liên quan. Toàn bộ nhật ký được giữ trên thiết bị và được loại khỏi bản sao lưu. App không lưu bản ghi âm vào nhật ký. Lượt từ các bản cũ chưa lưu nhật ký không thể khôi phục.
+
+Kiểm tra lưu, mở lại và tìm lượt cũ trên Mac:
+
+```sh
+mkdir -p build/conversation-memory
+xcrun swiftc -parse-as-library Unity/Assets/Plugins/iOS/ChipiConversationMemory.swift \
+  tests/ChipiConversationMemoryCheck.swift -o build/conversation-memory/check
+build/conversation-memory/check
+```
+
 ## Chạy Phase 1 trên iPhone giả lập
 
 ```sh
@@ -16,7 +29,7 @@ scripts/run_iphone_simulator.sh --build
 
 Lần sau có thể bỏ `--build` để dùng lại bản đã đóng gói. Script mở iPhone 17 Pro Max giả lập (iOS 27.0) và cài Chipi. Có thể đặt `CHIPI_SIMULATOR_UDID` để chọn thiết bị khác. Trên máy phát triển này, iOS 26.2 báo mô hình sẵn sàng nhưng gặp lỗi nội bộ khi tạo câu trả lời. Dùng iOS 27.0 để kiểm tra hội thoại. Chạm một lần để bắt đầu phiên. Chipi mở lại micro sau khi phát xong câu trả lời. Chọn **End conversation** để dừng phiên. Chipi tự gửi sau khoảng 1,2 giây im lặng kể từ tiếng nói cuối cùng. Có thể dùng **Send now** để gửi sớm. Nếu chưa phát hiện tiếng nói sau 8 giây, Chipi dừng nghe. Mỗi lượt nhận tối đa khoảng 15 giây lời nói. Dùng **Try voice sample** để nghe câu mẫu ngay trong app.
 
-Trong phiên, **Mute** dừng nghe và **Unmute** mở lại micro; lời nói chưa gửi khi bật Mute sẽ bị bỏ. Khi Chipi đang xử lý, **Cancel response** bỏ lượt hiện tại; khi Chipi đang nói, **Interrupt** dừng câu trả lời và cho phép nói tiếp. Nếu micro đang tắt, Chipi giữ trạng thái tắt. Sau lỗi, **Retry** gửi lại lượt vừa rồi và **Speak again** bắt đầu lượt mới, vẫn giữ ngữ cảnh của những lượt đã hoàn tất. Kết thúc phiên sẽ xóa ngữ cảnh và âm thanh đang chờ thử lại. Ngắt lời bằng giọng nói tự động chưa được hỗ trợ.
+Trong phiên, **Mute** dừng nghe và **Unmute** mở lại micro; lời nói chưa gửi khi bật Mute sẽ bị bỏ. Khi Chipi đang xử lý, **Cancel response** bỏ lượt hiện tại; khi Chipi đang nói, **Interrupt** dừng câu trả lời và cho phép nói tiếp. Nếu micro đang tắt, Chipi giữ trạng thái tắt. Sau lỗi, **Retry** gửi lại lượt vừa rồi và **Speak again** bắt đầu lượt mới, vẫn giữ ngữ cảnh của những lượt đã hoàn tất. Kết thúc phiên sẽ bỏ âm thanh đang chờ thử lại. Lịch sử đã lưu vẫn dùng được ở phiên sau. Ngắt lời bằng giọng nói tự động chưa được hỗ trợ.
 
 Trong khoảng 0,2 giây đầu, bộ phát hiện lời nói ước lượng tiếng nền; tiếng nói đủ lớn vẫn được nhận ngay. Các bản build Unity tự kiểm tra phát hiện lời nói với WAV mẫu, tiếng nền và khoảng ngừng ngắn.
 
